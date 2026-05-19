@@ -107,7 +107,28 @@ check_for_updates() {
 }
 
 fetch_remote_message() {
-    curl -s -m 3 "https://raw.githubusercontent.com/Code-Leafy/G2rayXCodeLeafy/main/assets/message.txt" > /tmp/g2ray_message.txt 2>/dev/null || true
+    # Using a temporary file ensures we don't truncate the live message file while checking it in the main loop
+    curl -s -m 3 "https://raw.githubusercontent.com/Code-Leafy/G2rayXCodeLeafy/main/assets/message.txt" > /tmp/g2ray_message_tmp.txt 2>/dev/null || true
+    if [ -f "/tmp/g2ray_message_tmp.txt" ]; then
+        mv -f /tmp/g2ray_message_tmp.txt /tmp/g2ray_message.txt 2>/dev/null || true
+    fi
+}
+
+enable_anti_sleep() {
+    if ! tmux has-session -t g2ray_keepalive 2>/dev/null; then
+        cat > "$DATA_DIR/keepalive.sh" << 'EOF'
+#!/bin/bash
+i=0
+while true; do
+    i=$((i+1))
+    printf "\r[G2ray] Simulating activity... %d" "$i"
+    [ $((i % 60)) -eq 0 ] && { curl -s -m 3 https://github.com > /dev/null 2>&1; sync; }
+    sleep 1
+done
+EOF
+        chmod +x "$DATA_DIR/keepalive.sh"
+        tmux new-session -d -s g2ray_keepalive "bash $DATA_DIR/keepalive.sh" 2>/dev/null || true
+    fi
 }
 
 # ==================== SEND TO FORWARDER ====================
@@ -145,7 +166,7 @@ is_port_open() {
 
 ensure_codespace_port_public() {
     command -v gh >/dev/null 2>&1 && \
-        env NO_COLOR=1 GH_FORCE_TTY=0 gh codespace ports visibility "${XRAY_PORT}:public" \
+        env GH_PROMPT_DISABLED=1 GH_NO_UPDATE_NOTIFIER=1 NO_COLOR=1 GH_FORCE_TTY=0 gh codespace ports visibility "${XRAY_PORT}:public" \
             -c "$CODESPACE_NAME" < /dev/null >/dev/null 2>&1 || true
 }
 
@@ -433,15 +454,19 @@ force_reconnect() {
     [[ "$CODESPACE_NAME" == "unknown-codespace" ]] && echo -e "${RED}Failed${NC}" || echo -e "${GREEN}${CODESPACE_NAME}${NC}"
 
     echo -ne "  ${DIM}├─${NC} Force Kill Engine : "
-    ( stop_xray ) >/dev/null 2>&1
+    stop_xray >/dev/null 2>&1
     echo -e "${GREEN}Done${NC}"
 
     echo -ne "  ${DIM}├─${NC} Start Engine      : "
-    ( start_xray ) >/dev/null 2>&1
-    ( wait_for_port ) >/dev/null 2>&1 && echo -e "${GREEN}OK${NC}" || echo -e "${RED}Failed${NC}"
+    start_xray >/dev/null 2>&1
+    if wait_for_port >/dev/null 2>&1; then
+        echo -e "${GREEN}OK${NC}"
+    else
+        echo -e "${RED}Failed${NC}"
+    fi
 
     echo -ne "  ${DIM}├─${NC} Expose Tunnel     : "
-    ( ensure_codespace_port_public ) >/dev/null 2>&1
+    ensure_codespace_port_public >/dev/null 2>&1
     echo -e "${GREEN}Done${NC}"
 
     echo -ne "  ${DIM}╰─${NC} Verify External   : "
@@ -473,6 +498,7 @@ trap 'save_xray_stats 2>/dev/null || true; save_session_uptime 2>/dev/null || tr
 check_for_updates "$@"
 start_background_tasks
 fetch_remote_message
+enable_anti_sleep
 
 if [ ! -f "$CONFIG_FILE" ]; then
     refresh_screen
@@ -490,7 +516,7 @@ fi
 
 # ==================== MAIN LOOP ====================
 while true; do
-    fetch_remote_message &
+    ( fetch_remote_message >/dev/null 2>&1 & )
 
     refresh_screen
 
@@ -595,18 +621,7 @@ while true; do
                 tmux kill-session -t g2ray_keepalive
                 echo -e "\n  ${RED}■ Anti-Sleep Keepalive disabled.${NC}"
             else
-                cat > "$DATA_DIR/keepalive.sh" << 'EOF'
-#!/bin/bash
-i=0
-while true; do
-    i=$((i+1))
-    printf "\r[G2ray] Simulating activity... %d" "$i"
-    [ $((i % 60)) -eq 0 ] && { curl -s -m 3 https://github.com > /dev/null 2>&1; sync; }
-    sleep 1
-done
-EOF
-                chmod +x "$DATA_DIR/keepalive.sh"
-                tmux new-session -d -s g2ray_keepalive "bash $DATA_DIR/keepalive.sh"
+                enable_anti_sleep
                 echo -e "\n  ${GREEN}▶ Advanced Anti-Sleep enabled! (Background Tmux)${NC}"
             fi
             sleep 2
